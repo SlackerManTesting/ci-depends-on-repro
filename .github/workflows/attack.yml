@@ -1,4 +1,4 @@
-﻿name: Attack Trigger
+name: Attack Trigger
 
 # Research tooling for the OpenThread "Depends-On:" pull-request-body directive
 # finding. Runs the attack end to end on this (operator-owned) testbed and posts

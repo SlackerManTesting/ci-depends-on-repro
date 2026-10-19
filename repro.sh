@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # Local replay of the OpenThread "Depends-On:" pull-request-body directive.
 #
 # Zero network, zero writes outside a temp dir, ~5 seconds, no GitHub account.
