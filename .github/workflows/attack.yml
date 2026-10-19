@@ -36,7 +36,7 @@ permissions:
 env:
   REPO: SlackerManTesting/ci-depends-on-repro
   SIB: SlackerManTesting/ci-depends-on-sib
-  SIB_PR: "1"
+  SIB_PR: "2"
 
 jobs:
   attack:
