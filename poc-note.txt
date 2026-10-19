@@ -1,1 +1,1 @@
-attack-trigger demo 2026-10-19T20:19:36Z (inert file; the payload lives in the sibling repository)
+attack-trigger demo second run 2026-10-19T20:20:13Z
