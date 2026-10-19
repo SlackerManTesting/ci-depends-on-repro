@@ -220,8 +220,8 @@ jobs:
             echo "### 4. the bot comment is rewritten IN PLACE on the next run (same id, created_at unchanged)"
             echo "first run  comment id=${FIRST_ID}"
             echo "second run comment id=${new_id}  created=$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/comments/${new_id}" --jq .created_at 2>/dev/null || echo '?')  updated=$(GH_TOKEN="${GH_READ}" gh api "repos/${REPO}/issues/comments/${new_id}" --jq .updated_at 2>/dev/null || echo '?')"
-          } > evidence2.md
-          cat evidence2.md >> "$GITHUB_STEP_SUMMARY"
+          } > "${GITHUB_WORKSPACE}/evidence2.md"
+          cat "${GITHUB_WORKSPACE}/evidence2.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post the evidence into the issue thread
         if: always()
@@ -243,7 +243,7 @@ jobs:
             echo
             cat bot-comment.md 2>/dev/null || echo "_(bot comment not captured)_"
             echo
-            cat evidence2.md 2>/dev/null || echo "_(second-run comparison did not complete)_"
+            cat "${GITHUB_WORKSPACE}/evidence2.md" 2>/dev/null || echo "_(second-run comparison did not complete)_"
             echo
             echo "### 5. same code path in OpenThread's own CI"
             echo "\`script/git-tool:45-50\` (this repo's copy is byte-identical to upstream) greps the PR body and runs"
