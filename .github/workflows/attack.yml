@@ -42,7 +42,7 @@ jobs:
   attack:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request == null && github.event.issue.comment.body.trim() == '/attack')
+      (github.event.issue.pull_request == null && github.event.issue.comment.body == '/attack')
     runs-on: ubuntu-24.04
     steps:
       - name: Auth check
@@ -198,7 +198,7 @@ jobs:
           git add poc-note.txt
           git -c user.name="attack-trigger" -c user.email="attack-trigger@users.noreply.github.com" commit -qm "poc: second run"
           # fast-forward the SAME branch so the pull_request workflow re-runs (synchronize)
-          git push -q origin "tmp-${n:-second}:${BRANCH}"
+          git push -q origin "tmp-${n}:${BRANCH}"
 
           new_id=""
           for i in $(seq 1 40); do
@@ -228,7 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## Attack result â€” ran on GitHub just now"
+            echo "## Attack result - ran on GitHub just now"
             echo
             echo "Attack pull request: ${PR_URL}  (the \`Depends-On:\` line is in the **description**, not in the diff)"
             echo "Consumer run: https://github.com/${REPO}/actions/runs/${RUN_ID}"
