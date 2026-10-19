@@ -1,0 +1,26 @@
+name: CI Consumer
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    branches: ['main']
+
+permissions:
+  contents: read
+
+jobs:
+  consumer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run consumer
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash -x ./script/run-consumer
+      - name: Upload report
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: report_pr
+          path: /tmp/ot-size-report/report_pr
