@@ -42,7 +42,7 @@ jobs:
   attack:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request == null && github.event.issue.comment.body == '/attack')
+      (github.event.issue.pull_request == null && github.event.comment.body == '/attack')
     runs-on: ubuntu-24.04
     steps:
       - name: Auth check
