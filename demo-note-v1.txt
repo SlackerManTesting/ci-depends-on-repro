@@ -1,0 +1,1 @@
+trivial demo note v1 (no dependency directive)
